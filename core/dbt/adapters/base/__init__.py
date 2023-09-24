@@ -14,6 +14,7 @@ from dbt.adapters.base.impl import (  # noqa: F401
     AdapterConfig,
     BaseAdapter,
     PythonJobHelper,
+    ScalaJobHelper,
     ConstraintSupport,
 )
 from dbt.adapters.base.plugin import AdapterPlugin  # noqa: F401

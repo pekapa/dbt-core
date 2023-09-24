@@ -115,6 +115,8 @@ class RemoteFile(dbtClassMixin):
             self.path_end = ".sql"
         elif language == "python":
             self.path_end = ".py"
+        elif language == "scala":
+            self.path_end = ".scala"
         else:
             raise RuntimeError(f"Invalid language for remote File {language}")
         self.path = f"from remote system{self.path_end}"

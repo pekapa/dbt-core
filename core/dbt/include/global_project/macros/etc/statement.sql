@@ -15,6 +15,10 @@ The macro override naming method (spark__statement) only works for macros which 
       {%- set res = submit_python_job(model, compiled_code) -%}
       {#-- TODO: What should table be for python models? --#}
       {%- set table = None -%}
+    {%- elif language == 'scala' -%}
+      {%- set res = submit_scala_job(model, compiled_code) -%}
+      {#-- TODO: What should table be for scala models? --#}
+      {%- set table = None -%}
     {%- else -%}
       {% do exceptions.raise_compiler_error("statement macro didn't get supported language") %}
     {%- endif -%}

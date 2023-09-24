@@ -88,4 +88,5 @@ class RunHookType(StrEnum):
 
 class ModelLanguage(StrEnum):
     python = "python"
+    scala = "scala"
     sql = "sql"

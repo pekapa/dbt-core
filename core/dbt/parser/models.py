@@ -28,6 +28,12 @@ from dbt.exceptions import (
     UndefinedMacroError,
 )
 
+# New for Scala models
+from pygments import lex
+from pygments.lexers import ScalaLexer
+from pygments.token import Token
+
+
 dbt_function_key_words = set(["ref", "source", "config", "get"])
 dbt_function_full_names = set(["dbt.ref", "dbt.source", "dbt.config", "dbt.config.get"])
 
@@ -166,6 +172,20 @@ def verify_python_model_code(node):
         raise ParsingError("No jinja in python model code is allowed", node=node)
 
 
+def verify_scala_model_code(node):
+    # TODO: add a test for this
+    try:
+        rendered_scala = get_rendered(
+            node.raw_code,
+            {},
+            node,
+        )
+        if rendered_scala != node.raw_code:
+            raise ParsingError("")
+    except (UndefinedMacroError, ParsingError):
+        raise ParsingError("No jinja in scala model code is allowed", node=node)
+
+
 class ModelParser(SimpleSQLParser[ModelNode]):
     def parse_from_dict(self, dct, validate=True) -> ModelNode:
         if validate:
@@ -228,6 +248,168 @@ class ModelParser(SimpleSQLParser[ModelNode]):
                 config_keys_defaults=config_keys_defaults,
             )
 
+    def parse_scala_model(self, node, config, context):
+        lexer = ScalaLexer()
+        tokens = list(lex(node.raw_code, lexer))
+
+        in_import_statement = False
+        packages_imported = []
+        current_import = None
+        in_function_def = False
+        function_defs = []
+        current_function_def = None
+        in_dbt_function_call = False
+        in_dbt_function_naming = False
+        in_dbt_function_arguments = False
+        dbt_function_calls = []
+        current_dbt_function = None
+        current_dbt_arguments = None
+        open_parenthesis = 0
+        current_level = open_parenthesis
+
+        for token_type, token_value in tokens:
+            # identify imports
+            if token_type is Token.Keyword and token_value == 'import':
+                in_import_statement = True
+                current_import = []
+                continue
+
+            if in_import_statement:
+                if token_type is Token.Name.Namespace:
+                    current_import.append(token_value)
+                elif token_type is Token.Text.Whitespace and '\n' in token_value:
+                    in_import_statement = False
+                    packages_imported.append(".".join(current_import))
+                elif token_type is Token.Punctuation and token_value == ',':
+                    in_import_statement = False
+                    packages_imported.append(".".join(current_import))
+                continue
+
+            # Find all function definitions
+            if token_type is Token.Name.Function:
+                current_function_def = {'name': token_value, 'arguments': []}
+                in_function_def = True
+                continue
+
+            if in_function_def:
+                if token_type is Token.Punctuation and token_value == "(":
+                    open_parenthesis += 1
+                elif token_type is Token.Name:
+                    current_function_def['arguments'].append(token_value)
+                elif token_type is Token.Punctuation and token_value == ")":
+                    open_parenthesis -= 1
+                    in_function_def = False
+                    function_defs.append(current_function_def)
+                elif token_type is Token.Operator and token_value == "=":
+                    in_function_def = False
+                    function_defs.append(current_function_def)
+                continue
+            
+            # identify dbt function calls
+            if token_type is Token.Name and token_value == "dbt":
+                in_dbt_function_call = True
+                in_dbt_function_naming = True
+                in_dbt_function_arguments = False
+                current_dbt_function = []
+                current_dbt_arguments = []
+                current_level = open_parenthesis
+                continue
+
+            if in_dbt_function_call:
+                if token_type is Token.Name:
+                    if in_dbt_function_naming:
+                        current_dbt_function.append(token_value)
+                    if in_dbt_function_arguments:
+                        # ensure function calls are made using literals only
+                        raise ParsingError(
+                            "In dbt scala model, `dbt.ref`, `dbt.source`, `dbt.config`, `dbt.config.get` function args only support Scala literal structures",
+                            node=node
+                        )
+                elif token_type is Token.Punctuation and token_value == '(':
+                    open_parenthesis += 1
+                    if in_dbt_function_naming:
+                        in_dbt_function_naming = False
+                        in_dbt_function_arguments = True
+                elif token_type is Token.Literal.String and in_dbt_function_arguments:
+                    # strings -> remove quote marks
+                    current_dbt_arguments.append(token_value[1:-1])
+                elif token_type is Token.Keyword.Constant and in_dbt_function_arguments:
+                    # booleans
+                    current_dbt_arguments.append(token_value.capitalize())
+                elif token_type in Token.Literal and in_dbt_function_arguments:
+                    # all others
+                    current_dbt_arguments.append(token_value)
+                elif token_type is Token.Punctuation and token_value == ')':
+                    open_parenthesis -= 1
+                    if open_parenthesis == current_level:
+                        in_dbt_function_arguments = False
+                        in_dbt_function_call = False
+                        dbt_function_calls.append(('.'.join(current_dbt_function), current_dbt_arguments))
+                continue
+
+        # identify that there's one and only one function "model" with "dbt" as first argument and up to two arguments total
+        model_functions = [f for f in function_defs if f['name'] == 'model']
+        if len(model_functions) != 1:
+            raise ParsingError(
+                f"dbt allows exactly one model defined per python file, found {len(model_functions)}",
+                node=node,
+            )
+        
+        model = model_functions[0]
+        model_errors = []
+        if len(model['arguments']) and not model['arguments'][0] == "dbt":
+            model_errors.append("'dbt' not provided for model as the first argument")
+        if len(model['arguments']) != 3:
+            # dbtObj is recognized as a Token.Name, therefore included in the current way of selecting the arguments
+            model_errors.append(
+                "model function should have two args, `dbt` of type `dbtObj` and a session to current warehouse of type `SparkSession`"
+            )
+
+        if len(model_errors):
+            raise ParsingError("/n".join(model_errors), node=node)
+
+        # check that get is consistent (1 or 2 arguments)
+        # adjust config Scala map to Python dict
+        # add function calls to the context map
+        # list config keys used and their defaults and add it to the context map
+        config_keys_used = []
+        config_keys_defaults = []
+
+        for (func, args) in dbt_function_calls:
+            kwargs = {}
+            if func == "config.get":
+                func = "get"
+                num_args = len(args)
+                if num_args == 0:
+                    raise ParsingError(
+                        "dbt.config.get() requires at least one argument",
+                        node=node,
+                    )
+                if num_args > 2:
+                    raise ParsingError(
+                        f"dbt.config.get() takes at most 2 arguments ({num_args} given)",
+                        node=node,
+                    )
+                key = args[0]
+                default_value = args[1] if num_args == 2 else None
+                config_keys_used.append(key)
+                config_keys_defaults.append(default_value)
+                continue
+
+            if func == "config":
+                args_it = iter(args)
+                kwargs = dict(zip(args_it, args_it))
+                args = []
+            
+            context[func](*args, **kwargs)
+
+        if config_keys_used:
+            # this is being used in macro build_config_dict
+            context["config"](
+                config_keys_used=config_keys_used,
+                config_keys_defaults=config_keys_defaults,
+            )
+
     def render_update(self, node: ModelNode, config: ContextConfig) -> None:
         self.manifest._parsing_info.static_analysis_path_count += 1
         flags = get_flags()
@@ -242,6 +424,18 @@ class ModelParser(SimpleSQLParser[ModelNode]):
                 # we got a ValidationError - probably bad types in config()
                 raise ModelConfigError(exc, node=node) from exc
             return
+        
+        elif node.language == ModelLanguage.scala:
+            try:
+                verify_scala_model_code(node)
+                context = self._context_for(node, config)
+                self.parse_scala_model(node, config, context)
+                self.update_parsed_node_config(node, config, context=context)
+            except ValidationError as exc:
+                # we got a ValidationError - probably bad types in config()
+                raise ModelConfigError(exc, node=node) from exc
+            return
+
 
         elif not flags.STATIC_PARSER:
             # jinja rendering
