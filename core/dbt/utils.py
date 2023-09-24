@@ -619,9 +619,7 @@ def _connection_exception_retry(fn, max_attempts: int, attempt: int = 0):
             time.sleep(1)
             return _connection_exception_retry(fn, max_attempts, attempt + 1)
         else:
-            raise dbt.exceptions.ConnectionError(
-                "External connection exception occurred: " + str(exc)
-            )
+            raise ConnectionError("External connection exception occurred: " + str(exc))
 
 
 # This is used to serialize the args in the run_results and in the logs.
