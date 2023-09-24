@@ -1373,9 +1373,9 @@ class BaseAdapter(metaclass=AdapterMeta):
         # process submission result to generate adapter response
         return self.generate_python_submission_response(submission_result)
 
-    def generate_scala_submission_response(self, submission_result: Any) -> AdapterResponse:
+    def generate_python_submission_response(self, submission_result: Any) -> AdapterResponse:
         raise NotImplementedError(
-            "Your adapter need to implement generate_scala_submission_response"
+            "Your adapter need to implement generate_python_submission_response"
         )
 
     @property
@@ -1403,6 +1403,11 @@ class BaseAdapter(metaclass=AdapterMeta):
         submission_result = job_helper.submit(compiled_code)
         # process submission result to generate adapter response
         return self.generate_scala_submission_response(submission_result)
+
+    def generate_scala_submission_response(self, submission_result: Any) -> AdapterResponse:
+        raise NotImplementedError(
+            "Your adapter need to implement generate_scala_submission_response"
+        )
 
     def valid_incremental_strategies(self):
         """The set of standard builtin strategies which this adapter supports out-of-the-box.
