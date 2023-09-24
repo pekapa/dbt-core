@@ -136,7 +136,9 @@ def _relation_name(rel: Optional[BaseRelation]) -> str:
 def log_code_execution(code_execution_function):
     # decorator to log code and execution time
     if code_execution_function.__name__ not in ("submit_python_job", "submit_scala_job"):
-        raise ValueError("this should be only used to log submit_python_job and submit_scala_job now")
+        raise ValueError(
+            "this should be only used to log submit_python_job and submit_scala_job now"
+        )
 
     def execution_with_log(*args):
         self = args[0]
@@ -1401,11 +1403,6 @@ class BaseAdapter(metaclass=AdapterMeta):
         submission_result = job_helper.submit(compiled_code)
         # process submission result to generate adapter response
         return self.generate_scala_submission_response(submission_result)
-
-    def generate_scala_submission_response(self, submission_result: Any) -> AdapterResponse:
-        raise NotImplementedError(
-            "Your adapter need to implement generate_python_submission_response"
-        )
 
     def valid_incremental_strategies(self):
         """The set of standard builtin strategies which this adapter supports out-of-the-box.
