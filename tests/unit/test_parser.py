@@ -344,40 +344,6 @@ models:
 """
 
 
-MULTIPLE_TABLE_VERSIONED_MODEL_CONTRACT_ENFORCED = """
-models:
-    - name: my_model
-      config:
-        contract:
-            enforced: true
-      versions:
-        - v: 0
-          defined_in: arbitrary_file_name
-        - v: 2
-"""
-
-
-MULTIPLE_TABLE_VERSIONED_MODEL_V0 = """
-models:
-    - name: my_model
-      versions:
-        - v: 0
-          defined_in: arbitrary_file_name
-        - v: 2
-"""
-
-
-MULTIPLE_TABLE_VERSIONED_MODEL_V0_LATEST_VERSION = """
-models:
-    - name: my_model
-      latest_version: 0
-      versions:
-        - v: 0
-          defined_in: arbitrary_file_name
-        - v: 2
-"""
-
-
 SINGLE_TABLE_SOURCE_PATCH = """
 sources:
   - name: my_source
