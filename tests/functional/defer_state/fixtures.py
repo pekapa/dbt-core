@@ -228,18 +228,11 @@ models:
   - name: view_model
     columns:
       - name: id
-        data_type: integer
         tests:
           - unique:
               severity: error
           - not_null
       - name: name
-        data_type: text
-"""
-
-versioned_no_contract_schema_yml = """
-version: 2
-models:
   - name: table_model
     config:
       contract:
