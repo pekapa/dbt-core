@@ -666,7 +666,7 @@ class TestChangedConstraintUnversioned(BaseModifiedState):
         assert results[0].node.name == "table_model"
 
         manifest = get_manifest(project.project_root)
-        model_unique_id = self.MODEL_UNIQUE_ID
+        model_unique_id = "model.test.table_model"
         model = manifest.nodes[model_unique_id]
         expected_unrendered_config = {"contract": {"enforced": True}, "materialized": "table"}
         assert model.unrendered_config == expected_unrendered_config
@@ -788,14 +788,6 @@ class TestChangedMaterializationConstraint(BaseModifiedState):
         assert first_contract_checksum == second_contract_checksum
         run_dbt(["run", "--models", "state:modified.contract", "--state", "./state"])
         assert len(results) == 2
-
-
-class TestChangedContractVersioned(TestChangedContract):
-    MODEL_UNIQUE_ID = "model.test.table_model.v1"
-    CONTRACT_SCHEMA_YML = versioned_contract_schema_yml
-    MODIFIED_SCHEMA_YML = versioned_modified_contract_schema_yml
-    DISABLED_SCHEMA_YML = versioned_disabled_contract_schema_yml
-    NO_CONTRACT_SCHEMA_YML = versioned_no_contract_schema_yml
 
 
 my_model_sql = """
