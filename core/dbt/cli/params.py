@@ -40,10 +40,18 @@ compile_docs = click.option(
     default=True,
 )
 
+compile_inject_ephemeral_ctes = click.option(
+    "--inject-ephemeral-ctes/--no-inject-ephemeral-ctes",
+    envvar=None,
+    help="Internal flag controlling injection of referenced ephemeral models' CTEs during `compile`.",
+    hidden=True,
+    default=True,
+)
+
 config_dir = click.option(
     "--config-dir",
     envvar=None,
-    help="Show the configured location for the profiles.yml file and exit",
+    help="Print a system-specific command to access the directory that the current dbt project is searching for a profiles.yml. Then, exit. This flag renders other debug step flags no-ops.",
     is_flag=True,
 )
 
@@ -248,6 +256,23 @@ partial_parse = click.option(
     default=True,
 )
 
+partial_parse_file_path = click.option(
+    "--partial-parse-file-path",
+    envvar="DBT_PARTIAL_PARSE_FILE_PATH",
+    help="Internal flag for path to partial_parse.manifest file.",
+    default=None,
+    hidden=True,
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+)
+
+partial_parse_file_diff = click.option(
+    "--partial-parse-file-diff/--no-partial-parse-file-diff",
+    envvar="DBT_PARTIAL_PARSE_FILE_DIFF",
+    help="Internal flag for whether to compute a file diff during partial parsing.",
+    hidden=True,
+    default=True,
+)
+
 populate_cache = click.option(
     "--populate-cache/--no-populate-cache",
     envvar="DBT_POPULATE_CACHE",
@@ -290,7 +315,7 @@ printer_width = click.option(
 profile = click.option(
     "--profile",
     envvar=None,
-    help="Which profile to load. Overrides setting in dbt_project.yml.",
+    help="Which existing profile to load. Overrides setting in dbt_project.yml.",
 )
 
 profiles_dir = click.option(
@@ -425,10 +450,30 @@ skip_profile_setup = click.option(
     is_flag=True,
 )
 
+empty_catalog = click.option(
+    "--empty-catalog",
+    help="If specified, generate empty catalog.json file during the `dbt docs generate` command.",
+    default=False,
+    is_flag=True,
+)
+
 state = click.option(
     "--state",
     envvar="DBT_STATE",
-    help="If set, use the given directory as the source for JSON files to compare with this project.",
+    help="Unless overridden, use this state directory for both state comparison and deferral.",
+    type=click.Path(
+        dir_okay=True,
+        file_okay=False,
+        readable=True,
+        resolve_path=False,
+        path_type=Path,
+    ),
+)
+
+defer_state = click.option(
+    "--defer-state",
+    envvar="DBT_DEFER_STATE",
+    help="Override the state directory for deferral only.",
     type=click.Path(
         dir_okay=True,
         file_okay=False,
@@ -478,6 +523,13 @@ target_path = click.option(
     envvar="DBT_TARGET_PATH",
     help="Configure the 'target-path'. Only applies this setting for the current run. Overrides the 'DBT_TARGET_PATH' if it is set.",
     type=click.Path(),
+)
+
+debug_connection = click.option(
+    "--connection",
+    envvar=None,
+    help="Test the connection to the target database independent of dependency checks.",
+    is_flag=True,
 )
 
 threads = click.option(

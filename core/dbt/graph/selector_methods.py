@@ -61,8 +61,8 @@ def is_selected_node(fqn: List[str], node_selector: str, is_versioned: bool) -> 
         flat_node_selector = node_selector.split(".")
         if fqn[-2] == node_selector:
             return True
-        # If this is a versioned model, then the last two segments should be allowed to exactly match
-        elif fqn[-2:] == flat_node_selector[-2:]:
+        # If this is a versioned model, then the last two segments should be allowed to exactly match on either the '.' or '_' delimiter
+        elif "_".join(fqn[-2:]) == "_".join(flat_node_selector[-2:]):
             return True
     else:
         if fqn[-1] == node_selector:
@@ -103,7 +103,7 @@ SelectorTarget = Union[SourceDefinition, ManifestNode, Exposure, Metric]
 class SelectorMethod(metaclass=abc.ABCMeta):
     def __init__(
         self, manifest: Manifest, previous_state: Optional[PreviousState], arguments: List[str]
-    ):
+    ) -> None:
         self.manifest: Manifest = manifest
         self.previous_state = previous_state
         self.arguments: List[str] = arguments
@@ -351,6 +351,8 @@ class FileSelectorMethod(SelectorMethod):
         for node, real_node in self.all_nodes(included_nodes):
             if fnmatch(Path(real_node.original_file_path).name, selector):
                 yield node
+            elif fnmatch(Path(real_node.original_file_path).stem, selector):
+                yield node
 
 
 class PackageSelectorMethod(SelectorMethod):
@@ -435,6 +437,8 @@ class ResourceTypeSelectorMethod(SelectorMethod):
 
 
 class TestNameSelectorMethod(SelectorMethod):
+    __test__ = False
+
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         for node, real_node in self.parsed_nodes(included_nodes):
             if real_node.resource_type == NodeType.Test and hasattr(real_node, "test_metadata"):
@@ -443,6 +447,8 @@ class TestNameSelectorMethod(SelectorMethod):
 
 
 class TestTypeSelectorMethod(SelectorMethod):
+    __test__ = False
+
     def search(self, included_nodes: Set[UniqueId], selector: str) -> Iterator[UniqueId]:
         search_type: Type
         # continue supporting 'schema' + 'data' for backwards compatibility
@@ -461,7 +467,7 @@ class TestTypeSelectorMethod(SelectorMethod):
 
 
 class StateSelectorMethod(SelectorMethod):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.modified_macros: Optional[List[str]] = None
 
@@ -530,12 +536,24 @@ class StateSelectorMethod(SelectorMethod):
             return self.recursively_check_macros_modified(node, visited_macros)
 
     # TODO check modifed_content and check_modified macro seems a bit redundent
-    def check_modified_content(self, old: Optional[SelectorTarget], new: SelectorTarget) -> bool:
-        different_contents = not new.same_contents(old)  # type: ignore
+    def check_modified_content(
+        self, old: Optional[SelectorTarget], new: SelectorTarget, adapter_type: str
+    ) -> bool:
+        if isinstance(new, (SourceDefinition, Exposure, Metric)):
+            # these all overwrite `same_contents`
+            different_contents = not new.same_contents(old)  # type: ignore
+        else:
+            different_contents = not new.same_contents(old, adapter_type)  # type: ignore
+
         upstream_macro_change = self.check_macros_modified(new)
         return different_contents or upstream_macro_change
 
-    def check_modified_macros(self, _, new: SelectorTarget) -> bool:
+    def check_unmodified_content(
+        self, old: Optional[SelectorTarget], new: SelectorTarget, adapter_type: str
+    ) -> bool:
+        return not self.check_modified_content(old, new, adapter_type)
+
+    def check_modified_macros(self, old, new: SelectorTarget) -> bool:
         return self.check_macros_modified(new)
 
     @staticmethod
@@ -552,6 +570,21 @@ class StateSelectorMethod(SelectorMethod):
 
         return check_modified_things
 
+    @staticmethod
+    def check_modified_contract(
+        compare_method: str,
+        adapter_type: Optional[str],
+    ) -> Callable[[Optional[SelectorTarget], SelectorTarget], bool]:
+        # get a function that compares two selector target based on compare method provided
+        def check_modified_contract(old: Optional[SelectorTarget], new: SelectorTarget) -> bool:
+            if hasattr(new, compare_method):
+                # when old body does not exist or old and new are not the same
+                return not old or not getattr(new, compare_method)(old, adapter_type)  # type: ignore
+            else:
+                return False
+
+        return check_modified_contract
+
     def check_new(self, old: Optional[SelectorTarget], new: SelectorTarget) -> bool:
         return old is None
 
@@ -559,11 +592,15 @@ class StateSelectorMethod(SelectorMethod):
         if self.previous_state is None or self.previous_state.manifest is None:
             raise DbtRuntimeError("Got a state selector method, but no comparison manifest")
 
+        adapter_type = self.manifest.metadata.adapter_type
+
         state_checks = {
             # it's new if there is no old version
-            "new": lambda old, _: old is None,
+            "new": lambda old, new: old is None,
+            "old": lambda old, new: old is not None,
             # use methods defined above to compare properties of old + new
             "modified": self.check_modified_content,
+            "unmodified": self.check_unmodified_content,
             "modified.body": self.check_modified_factory("same_body"),
             "modified.configs": self.check_modified_factory("same_config"),
             "modified.persisted_descriptions": self.check_modified_factory(
@@ -571,7 +608,7 @@ class StateSelectorMethod(SelectorMethod):
             ),
             "modified.relation": self.check_modified_factory("same_database_representation"),
             "modified.macros": self.check_modified_macros,
-            "modified.contract": self.check_modified_factory("same_contract"),
+            "modified.contract": self.check_modified_contract("same_contract", adapter_type),
         }
         if selector in state_checks:
             checker = state_checks[selector]
@@ -584,6 +621,7 @@ class StateSelectorMethod(SelectorMethod):
 
         for node, real_node in self.all_nodes(included_nodes):
             previous_node: Optional[SelectorTarget] = None
+
             if node in manifest.nodes:
                 previous_node = manifest.nodes[node]
             elif node in manifest.sources:
@@ -593,7 +631,15 @@ class StateSelectorMethod(SelectorMethod):
             elif node in manifest.metrics:
                 previous_node = manifest.metrics[node]
 
-            if checker(previous_node, real_node):
+            keyword_args = {}
+            if checker.__name__ in [
+                "same_contract",
+                "check_modified_content",
+                "check_unmodified_content",
+            ]:
+                keyword_args["adapter_type"] = adapter_type  # type: ignore
+
+            if checker(previous_node, real_node, **keyword_args):  # type: ignore
                 yield node
 
 
@@ -721,7 +767,7 @@ class MethodManager:
         self,
         manifest: Manifest,
         previous_state: Optional[PreviousState],
-    ):
+    ) -> None:
         self.manifest = manifest
         self.previous_state = previous_state
 

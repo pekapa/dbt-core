@@ -13,12 +13,15 @@ from dbt.task.seed import SeedRunner
 
 
 class ShowRunner(CompileRunner):
-    def __init__(self, config, adapter, node, node_index, num_nodes):
+    def __init__(self, config, adapter, node, node_index, num_nodes) -> None:
         super().__init__(config, adapter, node, node_index, num_nodes)
         self.run_ephemeral_models = True
 
     def execute(self, compiled_node, manifest):
         start_time = time.time()
+
+        # Allow passing in -1 (or any negative number) to get all rows
+        limit = None if self.config.args.limit < 0 else self.config.args.limit
 
         if "sql_header" in compiled_node.unrendered_config:
             compiled_node.compiled_code = (
@@ -26,7 +29,7 @@ class ShowRunner(CompileRunner):
             )
 
         adapter_response, execute_result = self.adapter.execute(
-            compiled_node.compiled_code, fetch=True
+            compiled_node.compiled_code, fetch=True, limit=limit
         )
         end_time = time.time()
 
@@ -72,12 +75,7 @@ class ShowTask(CompileTask):
                     )
 
         for result in matched_results:
-            # Allow passing in -1 (or any negative number) to get all rows
             table = result.agate_table
-
-            if self.args.limit >= 0:
-                table = table.limit(self.args.limit)
-                result.agate_table = table
 
             # Hack to get Agate table output as string
             output = io.StringIO()

@@ -18,9 +18,14 @@ from dbt.context.context_config import ContextConfig
 from dbt.contracts.graph.manifest import Manifest
 from dbt.contracts.graph.nodes import Contract, BaseNode, ManifestNode
 from dbt.contracts.graph.unparsed import Docs, UnparsedNode
-from dbt.exceptions import DbtInternalError, ConfigUpdateError, DictParseError
+from dbt.exceptions import (
+    DbtInternalError,
+    ConfigUpdateError,
+    DictParseError,
+    InvalidAccessTypeError,
+)
 from dbt import hooks
-from dbt.node_types import NodeType, ModelLanguage
+from dbt.node_types import NodeType, ModelLanguage, AccessType
 from dbt.parser.search import FileBlock
 
 # internally, the parser may store a less-restrictive type that will be
@@ -71,19 +76,43 @@ class Parser(BaseParser[FinalValue], Generic[FinalValue]):
 
 class RelationUpdate:
     def __init__(self, config: RuntimeConfig, manifest: Manifest, component: str) -> None:
-        macro = manifest.find_generate_macro_by_name(
+        default_macro = manifest.find_generate_macro_by_name(
             component=component,
             root_project_name=config.project_name,
         )
-        if macro is None:
+        if default_macro is None:
             raise DbtInternalError(f"No macro with name generate_{component}_name found")
 
-        root_context = generate_generate_name_macro_context(macro, config, manifest)
-        self.updater = MacroGenerator(macro, root_context)
+        default_macro_context = generate_generate_name_macro_context(
+            default_macro, config, manifest
+        )
+        self.default_updater = MacroGenerator(default_macro, default_macro_context)
+
+        package_names = config.dependencies.keys() if config.dependencies else {}
+        package_updaters = {}
+        for package_name in package_names:
+            package_macro = manifest.find_generate_macro_by_name(
+                component=component,
+                root_project_name=config.project_name,
+                imported_package=package_name,
+            )
+            if package_macro:
+                imported_macro_context = generate_generate_name_macro_context(
+                    package_macro, config, manifest
+                )
+                package_updaters[package_macro.package_name] = MacroGenerator(
+                    package_macro, imported_macro_context
+                )
+
+        self.package_updaters = package_updaters
         self.component = component
 
     def __call__(self, parsed_node: Any, override: Optional[str]) -> None:
-        new_value = self.updater(override, parsed_node)
+        if parsed_node.package_name in self.package_updaters:
+            new_value = self.package_updaters[parsed_node.package_name](override, parsed_node)
+        else:
+            new_value = self.default_updater(override, parsed_node)
+
         if isinstance(new_value, str):
             new_value = new_value.strip()
         setattr(parsed_node, self.component, new_value)
@@ -215,6 +244,7 @@ class ConfiguredParser(
             "checksum": block.file.checksum.to_dict(omit_none=True),
         }
         dct.update(kwargs)
+
         try:
             return self.parse_from_dict(dct, validate=True)
         except ValidationError as exc:
@@ -305,6 +335,15 @@ class ConfiguredParser(
         # If we have group in the config, copy to node level
         if "group" in config_dict and config_dict["group"]:
             parsed_node.group = config_dict["group"]
+
+        # If we have access in the config, copy to node level
+        if parsed_node.resource_type == NodeType.Model and config_dict.get("access", None):
+            if AccessType.is_valid(config_dict["access"]):
+                parsed_node.access = AccessType(config_dict["access"])
+            else:
+                raise InvalidAccessTypeError(
+                    unique_id=parsed_node.unique_id, field_value=config_dict["access"]
+                )
 
         # If we have docs in the config, merge with the node level, for backwards
         # compatibility with earlier node-only config.

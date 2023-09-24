@@ -6,10 +6,9 @@ from copy import deepcopy
 import pytest
 
 from dbt.cli.exceptions import DbtUsageException
-from dbt.tests.util import run_dbt, write_file, rm_file
-
+from dbt.contracts.results import RunStatus
 from dbt.exceptions import DbtRuntimeError
-
+from dbt.tests.util import run_dbt, write_file, rm_file
 from tests.functional.defer_state.fixtures import (
     seed_csv,
     table_model_sql,
@@ -23,6 +22,7 @@ from tests.functional.defer_state.fixtures import (
     macros_sql,
     infinite_macros_sql,
     snapshot_sql,
+    view_model_now_table_sql,
 )
 
 
@@ -85,7 +85,7 @@ class BaseDeferState:
             f"{project_root}/target/manifest.json", f"{project_root}/state/manifest.json"
         )
 
-    def run_and_save_state(self, project_root):
+    def run_and_save_state(self, project_root, with_snapshot=False):
         results = run_dbt(["seed"])
         assert len(results) == 1
         assert not any(r.node.deferred for r in results)
@@ -94,6 +94,11 @@ class BaseDeferState:
         assert not any(r.node.deferred for r in results)
         results = run_dbt(["test"])
         assert len(results) == 2
+
+        if with_snapshot:
+            results = run_dbt(["snapshot"])
+            assert len(results) == 1
+            assert not any(r.node.deferred for r in results)
 
         # copy files
         self.copy_state(project_root)
@@ -278,3 +283,68 @@ class TestDeferStateDeletedUpstream(BaseDeferState):
         )
         results = run_dbt(["test", "--state", "state", "--defer", "--favor-state"])
         assert other_schema not in results[0].node.compiled_code
+
+
+class TestDeferStateFlag(BaseDeferState):
+    def test_defer_state_flag(self, project, unique_schema, other_schema):
+        project.create_test_schema(other_schema)
+
+        # test that state deferral works correctly
+        run_dbt(["compile", "--target-path", "target_compile"])
+        write_file(view_model_now_table_sql, "models", "table_model.sql")
+
+        results = run_dbt(["ls", "--select", "state:modified", "--state", "target_compile"])
+        assert results == ["test.table_model"]
+
+        run_dbt(["seed", "--target", "otherschema", "--target-path", "target_otherschema"])
+
+        # this will fail because we haven't loaded the seed in the default schema
+        run_dbt(
+            [
+                "run",
+                "--select",
+                "state:modified",
+                "--defer",
+                "--state",
+                "target_compile",
+                "--favor-state",
+            ],
+            expect_pass=False,
+        )
+
+        # this will fail because we haven't passed in --state
+        with pytest.raises(
+            DbtRuntimeError, match="Got a state selector method, but no comparison manifest"
+        ):
+            run_dbt(
+                [
+                    "run",
+                    "--select",
+                    "state:modified",
+                    "--defer",
+                    "--defer-state",
+                    "target_otherschema",
+                    "--favor-state",
+                ],
+                expect_pass=False,
+            )
+
+        # this will succeed because we've loaded the seed in other schema and are successfully deferring to it instead
+        results = run_dbt(
+            [
+                "run",
+                "--select",
+                "state:modified",
+                "--defer",
+                "--state",
+                "target_compile",
+                "--defer-state",
+                "target_otherschema",
+                "--favor-state",
+            ]
+        )
+
+        assert len(results.results) == 1
+        assert results.results[0].status == RunStatus.Success
+        assert results.results[0].node.name == "table_model"
+        assert results.results[0].adapter_response["rows_affected"] == 2

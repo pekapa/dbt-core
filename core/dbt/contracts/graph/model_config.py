@@ -2,17 +2,20 @@ from dataclasses import field, Field, dataclass
 from enum import Enum
 from itertools import chain
 from typing import Any, List, Optional, Dict, Union, Type, TypeVar, Callable
+from typing_extensions import Annotated
+
 from dbt.dataclass_schema import (
     dbtClassMixin,
     ValidationError,
-    register_pattern,
+    StrEnum,
 )
 from dbt.contracts.graph.unparsed import AdditionalPropertiesAllowed, Docs
 from dbt.contracts.graph.utils import validate_color
-from dbt.exceptions import DbtInternalError, CompilationError
 from dbt.contracts.util import Replaceable, list_str
+from dbt.exceptions import DbtInternalError, CompilationError
 from dbt import hooks
-from dbt.node_types import NodeType
+from dbt.node_types import NodeType, AccessType
+from mashumaro.jsonschema.annotations import Pattern
 
 
 M = TypeVar("M", bound="Metadata")
@@ -186,7 +189,14 @@ class Severity(str):
     pass
 
 
-register_pattern(Severity, insensitive_patterns("warn", "error"))
+class OnConfigurationChangeOption(StrEnum):
+    Apply = "apply"
+    Continue = "continue"
+    Fail = "fail"
+
+    @classmethod
+    def default(cls) -> "OnConfigurationChangeOption":
+        return cls.Apply
 
 
 @dataclass
@@ -287,11 +297,17 @@ class BaseConfig(AdditionalPropertiesAllowed, Replaceable):
                     return False
         return True
 
-    # This is used in 'add_config_call' to created the combined config_call_dict.
+    # This is used in 'add_config_call' to create the combined config_call_dict.
     # 'meta' moved here from node
     mergebehavior = {
         "append": ["pre-hook", "pre_hook", "post-hook", "post_hook", "tags"],
-        "update": ["quoting", "column_types", "meta", "docs", "contract"],
+        "update": [
+            "quoting",
+            "column_types",
+            "meta",
+            "docs",
+            "contract",
+        ],
         "dict_key_append": ["grants"],
     }
 
@@ -358,20 +374,23 @@ class BaseConfig(AdditionalPropertiesAllowed, Replaceable):
         self.validate(dct)
         return self.from_dict(dct)
 
-    def replace(self, **kwargs):
-        dct = self.to_dict(omit_none=True)
 
-        mapping = self.field_mapping()
-        for key, value in kwargs.items():
-            new_key = mapping.get(key, key)
-            dct[new_key] = value
-        return self.from_dict(dct)
+@dataclass
+class SemanticModelConfig(BaseConfig):
+    enabled: bool = True
+    group: Optional[str] = field(
+        default=None,
+        metadata=CompareBehavior.Exclude.meta(),
+    )
 
 
 @dataclass
 class MetricConfig(BaseConfig):
     enabled: bool = True
-    group: Optional[str] = None
+    group: Optional[str] = field(
+        default=None,
+        metadata=CompareBehavior.Exclude.meta(),
+    )
 
 
 @dataclass
@@ -424,11 +443,11 @@ class NodeConfig(NodeAndTestConfig):
     persist_docs: Dict[str, Any] = field(default_factory=dict)
     post_hook: List[Hook] = field(
         default_factory=list,
-        metadata=MergeBehavior.Append.meta(),
+        metadata={"merge": MergeBehavior.Append, "alias": "post-hook"},
     )
     pre_hook: List[Hook] = field(
         default_factory=list,
-        metadata=MergeBehavior.Append.meta(),
+        metadata={"merge": MergeBehavior.Append, "alias": "pre-hook"},
     )
     quoting: Dict[str, Any] = field(
         default_factory=dict,
@@ -445,6 +464,9 @@ class NodeConfig(NodeAndTestConfig):
     # sometimes getting the Union order wrong, causing serialization failures.
     unique_key: Union[str, List[str], None] = None
     on_schema_change: Optional[str] = "ignore"
+    on_configuration_change: OnConfigurationChangeOption = field(
+        default_factory=OnConfigurationChangeOption.default
+    )
     grants: Dict[str, Any] = field(
         default_factory=dict, metadata=MergeBehavior.DictKeyAppend.meta()
     )
@@ -485,29 +507,10 @@ class NodeConfig(NodeAndTestConfig):
     @classmethod
     def __pre_deserialize__(cls, data):
         data = super().__pre_deserialize__(data)
-        field_map = {"post-hook": "post_hook", "pre-hook": "pre_hook"}
-        # create a new dict because otherwise it gets overwritten in
-        # tests
-        new_dict = {}
-        for key in data:
-            new_dict[key] = data[key]
-        data = new_dict
         for key in hooks.ModelHookType:
             if key in data:
                 data[key] = [hooks.get_hook_dict(h) for h in data[key]]
-        for field_name in field_map:
-            if field_name in data:
-                new_name = field_map[field_name]
-                data[new_name] = data.pop(field_name)
         return data
-
-    def __post_serialize__(self, dct):
-        dct = super().__post_serialize__(dct)
-        field_map = {"post_hook": "post-hook", "pre_hook": "pre-hook"}
-        for field_name in field_map:
-            if field_name in dct:
-                dct[field_map[field_name]] = dct.pop(field_name)
-        return dct
 
     # this is still used by jsonschema validation
     @classmethod
@@ -516,8 +519,17 @@ class NodeConfig(NodeAndTestConfig):
 
 
 @dataclass
+class ModelConfig(NodeConfig):
+    access: AccessType = field(
+        default=AccessType.Protected,
+        metadata=MergeBehavior.Update.meta(),
+    )
+
+
+@dataclass
 class SeedConfig(NodeConfig):
     materialized: str = "seed"
+    delimiter: str = ","
     quote_columns: Optional[bool] = None
 
     @classmethod
@@ -527,15 +539,21 @@ class SeedConfig(NodeConfig):
             raise ValidationError("A seed must have a materialized value of 'seed'")
 
 
+SEVERITY_PATTERN = r"^([Ww][Aa][Rr][Nn]|[Ee][Rr][Rr][Oo][Rr])$"
+
+
 @dataclass
 class TestConfig(NodeAndTestConfig):
+    __test__ = False
+
     # this is repeated because of a different default
     schema: Optional[str] = field(
         default="dbt_test__audit",
         metadata=CompareBehavior.Exclude.meta(),
     )
     materialized: str = "test"
-    severity: Severity = Severity("ERROR")
+    # Annotated is used by mashumaro for jsonschema generation
+    severity: Annotated[Severity, Pattern(SEVERITY_PATTERN)] = Severity("ERROR")
     store_failures: Optional[bool] = None
     where: Optional[str] = None
     limit: Optional[int] = None
@@ -632,6 +650,7 @@ class SnapshotConfig(EmptySnapshotConfig):
 
 RESOURCE_TYPES: Dict[NodeType, Type[BaseConfig]] = {
     NodeType.Metric: MetricConfig,
+    NodeType.SemanticModel: SemanticModelConfig,
     NodeType.Exposure: ExposureConfig,
     NodeType.Source: SourceConfig,
     NodeType.Seed: SeedConfig,

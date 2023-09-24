@@ -5,7 +5,7 @@ import traceback
 from abc import ABCMeta, abstractmethod
 from contextlib import nullcontext
 from datetime import datetime
-from typing import Type, Union, Dict, Any, Optional
+from typing import Any, Dict, List, Optional, Type, Union
 
 import dbt.exceptions
 from dbt import tracking
@@ -19,6 +19,7 @@ from dbt.contracts.results import (
     collect_timing_info,
     RunStatus,
     RunningStatus,
+    TimingInfo,
 )
 from dbt.events.contextvars import get_node_info
 from dbt.events.functions import fire_event
@@ -71,7 +72,7 @@ def read_profiles(profiles_dir=None):
 class BaseTask(metaclass=ABCMeta):
     ConfigType: Union[Type[NoneConfig], Type[Project]] = NoneConfig
 
-    def __init__(self, args, config, project=None):
+    def __init__(self, args, config, project=None) -> None:
         self.args = args
         self.config = config
         self.project = config if isinstance(config, Project) else project
@@ -156,7 +157,7 @@ def move_to_nearest_project_dir(project_dir: Optional[str]) -> str:
 class ConfiguredTask(BaseTask):
     ConfigType = RuntimeConfig
 
-    def __init__(self, args, config, manifest: Optional[Manifest] = None):
+    def __init__(self, args, config, manifest: Optional[Manifest] = None) -> None:
         super().__init__(args, config)
         self.graph: Optional[Graph] = None
         self.manifest = manifest
@@ -187,13 +188,13 @@ class ExecutionContext:
     timing information and the newest (compiled vs executed) form of the node.
     """
 
-    def __init__(self, node):
-        self.timing = []
+    def __init__(self, node) -> None:
+        self.timing: List[TimingInfo] = []
         self.node = node
 
 
 class BaseRunner(metaclass=ABCMeta):
-    def __init__(self, config, adapter, node, node_index, num_nodes):
+    def __init__(self, config, adapter, node, node_index, num_nodes) -> None:
         self.config = config
         self.adapter = adapter
         self.node = node
@@ -296,19 +297,6 @@ class BaseRunner(metaclass=ABCMeta):
             failures=result.failures,
         )
 
-    def skip_result(self, node, message):
-        thread_id = threading.current_thread().name
-        return RunResult(
-            status=RunStatus.Skipped,
-            thread_id=thread_id,
-            execution_time=0,
-            timing=[],
-            message=message,
-            node=node,
-            adapter_response={},
-            failures=None,
-        )
-
     def compile_and_execute(self, manifest, ctx):
         result = None
         with self.adapter.connection_for(self.node) if get_flags().INTROSPECT else nullcontext():
@@ -318,12 +306,11 @@ class BaseRunner(metaclass=ABCMeta):
                     node_info=ctx.node.node_info,
                 )
             )
-            with collect_timing_info("compile") as timing_info:
+            with collect_timing_info("compile", ctx.timing.append):
                 # if we fail here, we still have a compiled node to return
                 # this has the benefit of showing a build path for the errant
                 # model
                 ctx.node = self.compile(manifest)
-            ctx.timing.append(timing_info)
 
             # for ephemeral nodes, we only want to compile, not run
             if not ctx.node.is_ephemeral_model or self.run_ephemeral_models:
@@ -333,11 +320,9 @@ class BaseRunner(metaclass=ABCMeta):
                         node_info=ctx.node.node_info,
                     )
                 )
-                with collect_timing_info("execute") as timing_info:
+                with collect_timing_info("execute", ctx.timing.append):
                     result = self.run(ctx.node, manifest)
                     ctx.node = result.node
-
-                ctx.timing.append(timing_info)
 
         return result
 
@@ -402,8 +387,7 @@ class BaseRunner(metaclass=ABCMeta):
                 error = exc_str
 
         if error is not None:
-            # we could include compile time for runtime errors here
-            result = self.error_result(ctx.node, error, started, [])
+            result = self.error_result(ctx.node, error, started, ctx.timing)
         elif result is not None:
             result = self.from_run_result(result, started, ctx.timing)
         else:
@@ -487,7 +471,7 @@ class BaseRunner(metaclass=ABCMeta):
                     )
                 )
 
-        node_result = self.skip_result(self.node, error_message)
+        node_result = RunResult.from_node(self.node, RunStatus.Skipped, error_message)
         return node_result
 
     def do_skip(self, cause=None):

@@ -43,7 +43,7 @@ from dbt.exceptions import (
     UnexpectedNullError,
 )
 
-from dbt.adapters.protocol import AdapterConfig, ConnectionManagerProtocol
+from dbt.adapters.protocol import AdapterConfig
 from dbt.clients.agate_helper import empty_table, merge_tables, table_from_rows
 from dbt.clients.jinja import MacroGenerator
 from dbt.contracts.graph.manifest import Manifest, MacroManifest
@@ -60,7 +60,7 @@ from dbt.events.types import (
 )
 from dbt.utils import filter_null_values, executor, cast_to_str, AttrDict
 
-from dbt.adapters.base.connections import Connection, AdapterResponse
+from dbt.adapters.base.connections import Connection, AdapterResponse, BaseConnectionManager
 from dbt.adapters.base.meta import AdapterMeta, available
 from dbt.adapters.base.relation import (
     ComponentName,
@@ -216,7 +216,7 @@ class BaseAdapter(metaclass=AdapterMeta):
 
     Relation: Type[BaseRelation] = BaseRelation
     Column: Type[BaseColumn] = BaseColumn
-    ConnectionManager: Type[ConnectionManagerProtocol]
+    ConnectionManager: Type[BaseConnectionManager]
 
     # A set of clobber config fields accepted by this adapter
     # for use in materializations
@@ -230,7 +230,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         ConstraintType.foreign_key: ConstraintSupport.ENFORCED,
     }
 
-    def __init__(self, config):
+    def __init__(self, config) -> None:
         self.config = config
         self.cache = RelationsCache()
         self.connections = self.ConnectionManager(config)
@@ -282,7 +282,7 @@ class BaseAdapter(metaclass=AdapterMeta):
 
     @available.parse(lambda *a, **k: ("", empty_table()))
     def execute(
-        self, sql: str, auto_begin: bool = False, fetch: bool = False
+        self, sql: str, auto_begin: bool = False, fetch: bool = False, limit: Optional[int] = None
     ) -> Tuple[AdapterResponse, agate.Table]:
         """Execute the given SQL. This is a thin wrapper around
         ConnectionManager.execute.
@@ -291,10 +291,22 @@ class BaseAdapter(metaclass=AdapterMeta):
         :param bool auto_begin: If set, and dbt is not currently inside a
             transaction, automatically begin one.
         :param bool fetch: If set, fetch results.
+        :param Optional[int] limit: If set, only fetch n number of rows
         :return: A tuple of the query status and results (empty if fetch=False).
         :rtype: Tuple[AdapterResponse, agate.Table]
         """
-        return self.connections.execute(sql=sql, auto_begin=auto_begin, fetch=fetch)
+        return self.connections.execute(sql=sql, auto_begin=auto_begin, fetch=fetch, limit=limit)
+
+    def validate_sql(self, sql: str) -> AdapterResponse:
+        """Submit the given SQL to the engine for validation, but not execution.
+
+        This should throw an appropriate exception if the input SQL is invalid, although
+        in practice that will generally be handled by delegating to an existing method
+        for execution and allowing the error handler to take care of the rest.
+
+        :param str sql: The sql to validate
+        """
+        raise NotImplementedError("`validate_sql` is not implemented for this adapter!")
 
     @available.parse(lambda *a, **k: [])
     def get_column_schema_from_query(self, sql: str) -> List[BaseColumn]:
@@ -311,14 +323,21 @@ class BaseAdapter(metaclass=AdapterMeta):
 
     @available.parse(lambda *a, **k: ("", empty_table()))
     def get_partitions_metadata(self, table: str) -> Tuple[agate.Table]:
-        """Obtain partitions metadata for a BigQuery partitioned table.
+        """
+        TODO: Can we move this to dbt-bigquery?
+        Obtain partitions metadata for a BigQuery partitioned table.
 
-        :param str table_id: a partitioned table id, in standard SQL format.
+        :param str table: a partitioned table id, in standard SQL format.
         :return: a partition metadata tuple, as described in
             https://cloud.google.com/bigquery/docs/creating-partitioned-tables#getting_partition_metadata_using_meta_tables.
         :rtype: agate.Table
         """
-        return self.connections.get_partitions_metadata(table=table)
+        if hasattr(self.connections, "get_partitions_metadata"):
+            return self.connections.get_partitions_metadata(table=table)
+        else:
+            raise NotImplementedError(
+                "`get_partitions_metadata` is not implemented for this adapter!"
+            )
 
     ###
     # Methods that should never be overridden
@@ -391,7 +410,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         return {
             self.Relation.create_from(self.config, node).without_identifier()
             for node in manifest.nodes.values()
-            if (node.is_relational and not node.is_ephemeral_model)
+            if (node.is_relational and not node.is_ephemeral_model and not node.is_external_node)
         }
 
     def _get_catalog_schemas(self, manifest: Manifest) -> SchemaSearchMap:
@@ -422,7 +441,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         return info_schema_name_map
 
     def _relations_cache_for_schemas(
-        self, manifest: Manifest, cache_schemas: Set[BaseRelation] = None
+        self, manifest: Manifest, cache_schemas: Optional[Set[BaseRelation]] = None
     ) -> None:
         """Populate the relations cache for the given schemas. Returns an
         iterable of the schemas populated, as strings.
@@ -449,16 +468,17 @@ class BaseAdapter(metaclass=AdapterMeta):
         # it's possible that there were no relations in some schemas. We want
         # to insert the schemas we query into the cache's `.schemas` attribute
         # so we can check it later
-        cache_update: Set[Tuple[Optional[str], Optional[str]]] = set()
+        cache_update: Set[Tuple[Optional[str], str]] = set()
         for relation in cache_schemas:
-            cache_update.add((relation.database, relation.schema))
+            if relation.schema:
+                cache_update.add((relation.database, relation.schema))
         self.cache.update_schemas(cache_update)
 
     def set_relations_cache(
         self,
         manifest: Manifest,
         clear: bool = False,
-        required_schemas: Set[BaseRelation] = None,
+        required_schemas: Optional[Set[BaseRelation]] = None,
     ) -> None:
         """Run a query that gets a populated cache of the relations in the
         database and set the cache on this adapter.
@@ -792,7 +812,6 @@ class BaseAdapter(metaclass=AdapterMeta):
         schema: str,
         identifier: str,
     ) -> List[BaseRelation]:
-
         matches = []
 
         search = self._make_match_kwargs(database, schema, identifier)
@@ -993,7 +1012,7 @@ class BaseAdapter(metaclass=AdapterMeta):
         manifest: Optional[Manifest] = None,
         project: Optional[str] = None,
         context_override: Optional[Dict[str, Any]] = None,
-        kwargs: Dict[str, Any] = None,
+        kwargs: Optional[Dict[str, Any]] = None,
         text_only_columns: Optional[Iterable[str]] = None,
     ) -> AttrDict:
         """Look macro_name up in the manifest and execute its results.
@@ -1070,7 +1089,6 @@ class BaseAdapter(metaclass=AdapterMeta):
         schemas: Set[str],
         manifest: Manifest,
     ) -> agate.Table:
-
         kwargs = {"information_schema": information_schema, "schemas": schemas}
         table = self.execute_macro(
             GET_CATALOG_MACRO_NAME,
@@ -1491,7 +1509,6 @@ join diff_count using (id)
 def catch_as_completed(
     futures,  # typing: List[Future[agate.Table]]
 ) -> Tuple[agate.Table, List[Exception]]:
-
     # catalogs: agate.Table = agate.Table(rows=[])
     tables: List[agate.Table] = []
     exceptions: List[Exception] = []
