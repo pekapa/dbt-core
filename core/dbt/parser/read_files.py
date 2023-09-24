@@ -384,7 +384,7 @@ def get_file_types_for_project(project):
         },
         ParseFileType.Model: {
             "paths": project.model_paths,
-            "extensions": [".sql", ".py"],
+            "extensions": [".sql", ".py", "scala"],
             "parser": "ModelParser",
         },
         ParseFileType.Snapshot: {

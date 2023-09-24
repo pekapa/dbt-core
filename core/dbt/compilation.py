@@ -409,24 +409,29 @@ class Compiler:
         if extra_context is None:
             extra_context = {}
 
-        if node.language == ModelLanguage.python:
-            context = self._create_node_context(node, manifest, extra_context)
+        context = self._create_node_context(node, manifest, extra_context)
 
-            postfix = jinja.get_rendered(
-                "{{ py_script_postfix(model) }}",
+        # we should NOT jinja render the python and scala model's 'raw code'
+        code_to_render = {
+            ModelLanguage.python: "{{ py_script_postfix(model) }}",
+            ModelLanguage.scala: "{{ scala_script_prefix(model) }}",
+            ModelLanguage.sql: node.raw_code,
+        }
+
+        rendered_code = jinja.get_rendered(
+                code_to_render[node.language],
                 context,
                 node,
             )
-            # we should NOT jinja render the python model's 'raw code'
-            node.compiled_code = f"{node.raw_code}\n\n{postfix}"
+
+        if node.language == ModelLanguage.python:
+            node.compiled_code = f"{node.raw_code}\n\n{rendered_code}"
+
+        elif node.language == ModelLanguage.scala:
+            node.compiled_code = f"{rendered_code}\n\n{node.raw_code}"
 
         else:
-            context = self._create_node_context(node, manifest, extra_context)
-            node.compiled_code = jinja.get_rendered(
-                node.raw_code,
-                context,
-                node,
-            )
+            node.compiled_code = rendered_code
 
         node.compiled = True
 

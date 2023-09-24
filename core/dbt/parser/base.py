@@ -220,6 +220,9 @@ class ConfiguredParser(
         if block.path.relative_path.endswith(".py"):
             language = ModelLanguage.python
             config.add_config_call({"materialized": "table"})
+        elif block.path.relative_path.endswith(".scala"):
+            language = ModelLanguage.scala
+            config.add_config_call({"materialized": "table"})
         else:
             # this is not ideal but we have a lot of tests to adjust if don't do it
             language = ModelLanguage.sql

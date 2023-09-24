@@ -1328,6 +1328,19 @@ class ProviderContext(ManifestContext):
             )
         return self.adapter.submit_python_job(parsed_model, compiled_code)
 
+    @contextmember
+    def submit_scala_job(self, parsed_model: Dict, compiled_code: str) -> AdapterResponse:
+        # Check macro_stack and that the unique id is for a materialization macro
+        if not (
+            self.context_macro_stack.depth == 2
+            and self.context_macro_stack.call_stack[1] == "macro.dbt.statement"
+            and "materialization" in self.context_macro_stack.call_stack[0]
+        ):
+            raise DbtRuntimeError(
+                f"submit_scala_job is not intended to be called here, at model {parsed_model['alias']}, with macro call_stack {self.context_macro_stack.call_stack}."
+            )
+        return self.adapter.submit_scala_job(parsed_model, compiled_code)
+
 
 class MacroContext(ProviderContext):
     """Internally, macros can be executed like nodes, with some restrictions:
