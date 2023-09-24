@@ -377,7 +377,7 @@ class Translator:
         for key, value in kwargs.items():
             canonical_key = self.aliases.get(key, key)
             if canonical_key in result:
-                raise dbt.exceptions.DuplicateAliasError(kwargs, self.aliases, canonical_key)
+                raise DuplicateAliasError(kwargs, self.aliases, canonical_key)
             result[canonical_key] = self.translate_value(value)
         return result
 
